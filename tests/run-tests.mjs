@@ -27,11 +27,47 @@ expect('בעיטה טובה, לשמאל', { dir: -1 }, { runup: 'good', plant: '
 expect('רגל תמיכה רחוקה מאחור', { plantOffL: -0.8 }, { plant: 'behind' });
 expect('רגל תמיכה לפני הכדור', { plantOffL: 0.45 }, { plant: 'ahead' });
 expect('נשען אחורה', { leanDeg: -18 }, { lean: 'back' });
-expect('הנפה קצרה', { backswingKnee: 150 }, { backswing: 'short' });
-expect('ברך תמיכה נעולה', { plantKnee: 178 }, { plantKnee: 'stiff' });
+expect('הנפה קצרה', { backswingKnee: 179 }, { backswing: 'short' });
+expect('הנפה בינונית = בסדר, בלי הערה', { backswingKnee: 150 }, { backswing: 'ok' });
+expect('ברך תמיכה נעולה', { plantKnee: 179.8 }, { plantKnee: 'stiff' });
 expect('בלי המשך תנועה', { followL: 0.3 }, { follow: 'short' });
 expect('ריצה קצרה', { runupL: 1.5 }, { runup: 'short' });
 expect('כדור לא זז בזיהוי', { ballMoves: false }, { plant: 'good', lean: 'good' });
+
+console.log('— עמידות לרעש —');
+// רעש בנקודות + החלפת ימין/שמאל אקראית ב-25% מהפריימים (כמו שקורה במודל אמיתי)
+function corrupt(frames, seed = 7) {
+  let r = seed;
+  const rnd = () => ((r = (r * 9301 + 49297) % 233280) / 233280);
+  const pairs = [[23, 24], [25, 26], [27, 28], [29, 30], [31, 32]];
+  return frames.map((f) => {
+    const pose = f.pose.map((p) => ({ ...p, x: p.x + (rnd() - 0.5) * 0.006, y: p.y + (rnd() - 0.5) * 0.01 }));
+    if (rnd() < 0.25) for (const [a, b] of pairs) { const t = pose[a]; pose[a] = pose[b]; pose[b] = t; }
+    return { ...f, pose };
+  });
+}
+for (const [name, params, exp] of [
+  ['בעיטה טובה עם רעש והחלפות רגליים', {}, { plant: 'good', lean: 'good', follow: 'good' }],
+  ['רגל תמיכה מאחור עם רעש', { plantOffL: -0.8 }, { plant: 'behind' }],
+  ['נשען אחורה עם רעש', { leanDeg: -20 }, { lean: 'back' }],
+]) {
+  const { frames, aspect } = synthKick(params);
+  const r = analyzeKick(corrupt(frames), aspect);
+  const bad = r.ok ? Object.entries(exp).filter(([k, v]) => r.metrics[k].status !== v) : [['error', r.error]];
+  check(name, bad.length === 0 && r.kickSide === 'left', r.ok ? fmt(r) + ` swaps=${r.quality.swaps}` : r.error);
+}
+{
+  const { frames, aspect } = synthKick({ plantVis: 0.2, plantOffL: -0.8 });
+  const r = analyzeKick(frames, aspect);
+  check('רגל תמיכה מוסתרת → לא מעירים עליה', r.ok && r.metrics.plant.status === 'na' && r.metrics.plantKnee.status === 'na', r.ok ? fmt(r) : r.error);
+}
+{
+  // צילום איטי מדי (8 פריימים בשנייה): לא להעיר הערות שגויות על הנפה/המשך
+  const { frames, aspect } = synthKick({ fps: 8 });
+  const r = analyzeKick(frames, aspect);
+  const wrong = r.ok ? ['backswing', 'follow'].filter((k) => !['good', 'ok', 'na'].includes(r.metrics[k].status)) : ['error'];
+  check('מעט פריימים → בלי הערות שגויות', wrong.length === 0, r.ok ? fmt(r) + ` fps=${r.quality.fps}` : r.error);
+}
 
 const fb = buildFeedback(good, { gender: 'f', name: 'נועה' });
 check('משוב נבנה', fb.speech.includes('מה היה טוב') && fb.speech.includes('נועה'), fb.speech.slice(0, 60) + '…');

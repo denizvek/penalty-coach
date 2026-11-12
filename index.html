@@ -33,7 +33,7 @@
       </button>
       <label class="big-btn" for="file-input">
         <span class="big-ico">🎞️</span>
-        <span><b>נתח סרטון מהגלריה</b><small>מומלץ: צילום בהילוך איטי במצלמה הרגילה</small></span>
+        <span><b>נתח סרטון בהילוך איטי</b><small>הכי מדויק: צלמו ב-Slo-mo במצלמה של הטלפון והעלו מהגלריה</small></span>
       </label>
       <input type="file" id="file-input" accept="video/*" hidden />
     </div>
@@ -59,6 +59,7 @@
         <li>מחזיקים את הטלפון <b>לרוחב</b>, יציב, בגובה המותניים.</li>
         <li>האפליקציה אומרת לאן לזוז. כשהמסגרת ירוקה ונשמע "מוכן" – בועטים. ההקלטה מתחילה ונעצרת לבד.</li>
       </ol>
+      <p class="tip"><b>לדיוק מקסימלי – הילוך איטי:</b> פותחים את המצלמה הרגילה של הטלפון ← מצב <b>Slo-mo / הילוך איטי</b> ← מצלמים מהצד באותה צורה ← כאן לוחצים "נתח סרטון בהילוך איטי". כדאי לחתוך את הסרטון כך שיתחיל קצת לפני הריצה.</p>
     </details>
 
     <section class="card" id="history-card" hidden>
@@ -123,6 +124,7 @@
         <button class="icon-btn" id="v-prev" aria-label="פריים קודם">⏴</button>
         <button class="icon-btn" id="v-play" aria-label="נגן לאט">▶</button>
         <button class="icon-btn" id="v-next" aria-label="פריים הבא">⏵</button>
+        <button class="btn small" id="v-speed" aria-label="מהירות ניגון">×¼</button>
         <input type="range" id="v-range" min="0" max="0" value="0" dir="ltr" aria-label="מיקום בסרטון" />
         <button class="btn small" id="v-contact">רגע הבעיטה</button>
       </div>

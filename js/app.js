@@ -116,6 +116,16 @@ $('#btn-clear-history').addEventListener('click', () => {
 });
 
 // ---------- מצלמה ----------
+// מבקשים מהמצלמה את קצב הפריימים הגבוה ביותר שהיא תומכת בו (עד 120)
+async function boostFrameRate(stream) {
+  const track = stream.getVideoTracks()[0];
+  try {
+    const max = track.getCapabilities?.().frameRate?.max;
+    if (max && max > 30) await track.applyConstraints({ frameRate: { ideal: Math.min(120, max) } });
+  } catch (e) { console.warn('frameRate', e); }
+  S.camFps = Math.round(track.getSettings?.().frameRate || 0) || null;
+}
+
 async function openCamera() {
   unlockSpeech();
   await startSensors();
@@ -131,6 +141,7 @@ async function openCamera() {
       loadModels({ onStatus: (t) => setBanner(t, null) }),
     ]);
     S.stream = stream;
+    await boostFrameRate(stream);
     video.srcObject = stream;
     video.style.transform = settings.facing === 'user' ? 'scaleX(-1)' : '';
     overlay.style.transform = video.style.transform;
@@ -146,6 +157,7 @@ async function openCamera() {
 
 function closeCamera() {
   stopSpeech();
+  if (S.rec) { try { S.rec.rec.stop(); } catch { /* */ } S.rec = null; }
   if (S.stream) S.stream.getTracks().forEach((t) => t.stop());
   S.stream = null;
   video.srcObject = null;
@@ -276,14 +288,14 @@ function updateRotation(rawPortrait, kid, aspect) {
   }
 }
 
-function rotatedSource(rot, rw, rh) {
-  if (!rot) return video;
+function rotatedSource(rot, rw, rh, src = video) {
+  if (!rot) return src;
   if (rotCanvas.width !== rh || rotCanvas.height !== rw) { rotCanvas.width = rh; rotCanvas.height = rw; }
   const c = rotCanvas.getContext('2d');
   c.setTransform(1, 0, 0, 1, 0, 0);
   if (rot === 90) { c.translate(rh, 0); c.rotate(Math.PI / 2); }
   else { c.translate(0, rw); c.rotate(-Math.PI / 2); }
-  c.drawImage(video, 0, 0, rw, rh);
+  c.drawImage(src, 0, 0, rw, rh);
   return rotCanvas;
 }
 
@@ -368,6 +380,7 @@ function processLive(t) {
         setBanner('בעיטה! עוד רגע…', null);
       } else if (t - S.armedAt > CONFIG.armedTimeoutMs) {
         speak('לא זיהיתי בעיטה. נכוון שוב');
+        stopRecorder();
         recycle(S.frames);
         resetLive();
       }
@@ -376,6 +389,39 @@ function processLive(t) {
     }
   }
   drawLive(kid, frame.ball);
+}
+
+// ---------- הקלטת וידאו מלאה (בקצב המלא של המצלמה) ----------
+function pickMime() {
+  if (typeof MediaRecorder === 'undefined') return null;
+  for (const m of ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']) {
+    try { if (MediaRecorder.isTypeSupported(m)) return m; } catch { /* */ }
+  }
+  return '';
+}
+function startRecorder() {
+  S.rec = null;
+  const mime = pickMime();
+  if (mime === null || !S.stream) return;
+  try {
+    const rec = new MediaRecorder(S.stream, { ...(mime ? { mimeType: mime } : {}), videoBitsPerSecond: 8_000_000 });
+    const r = { rec, chunks: [], startedAt: performance.now(), mime: rec.mimeType || mime };
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) r.chunks.push(e.data); };
+    rec.onstart = () => { r.startedAt = performance.now(); };
+    rec.start();
+    S.rec = r;
+  } catch (e) {
+    console.warn('אין הקלטת וידאו בדפדפן הזה', e);
+  }
+}
+function stopRecorder() {
+  const r = S.rec;
+  S.rec = null;
+  if (!r || r.rec.state === 'inactive') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    r.rec.onstop = () => resolve({ blob: new Blob(r.chunks, { type: r.mime || 'video/webm' }), startedAt: r.startedAt });
+    try { r.rec.stop(); } catch { resolve(null); }
+  });
 }
 
 function arm(t, kid) {
@@ -395,19 +441,53 @@ function arm(t, kid) {
   $('#banner').classList.add('rec');
   setBanner(S.armRef ? 'מוכן! אפשר לבעוט' : 'מקליט. אחרי הבעיטה לחצו "עצור ונתח"', null);
   speak('מוכן! אפשר לבעוט');
+  startRecorder();
   renderChips(null);
   $('#tap-hint').hidden = true;
 }
 
-function finishRecording() {
+async function finishRecording() {
   S.phase = 'analyzing';
-  const frames = S.frames;
+  const liveFrames = S.frames;
   S.frames = [];
   const aspect = S.aspect;
   const ballRef = S.armRef;
+  const rot = S.rot;
+  const kickAt = S.kickAt || performance.now();
+  const recorded = await stopRecorder();
   closeCamera();
-  const result = analyzeKick(frames, aspect, ballRef);
-  showResults(frames, aspect, result, { manualBall: ballRef });
+
+  // ניתוח מדויק: כל פריים מהסרטון שהוקלט, סביב רגע הבעיטה (4 שניות לפני, 1.3 אחרי)
+  if (recorded && recorded.blob.size > 0) {
+    show('processing');
+    S.cancelProcessing = false;
+    const prog = procProgress('מנתח את הבעיטה פריים אחרי פריים…');
+    try {
+      const kickV = (kickAt - recorded.startedAt) / 1000;
+      const { frames, aspect: a2 } = await analyzeVideo(recorded.blob, {
+        start: Math.max(0, kickV - 4),
+        end: kickV + 1.3,
+        rot,
+        maxFrames: 280,
+        ballHint: ballRef,
+        onProgress: prog,
+      });
+      if (frames.filter((f) => f.pose).length >= 8) {
+        const result = analyzeKick(frames, a2, ballRef);
+        if (result.ok || !analyzeKick(liveFrames, aspect, ballRef).ok) {
+          recycle(liveFrames);
+          showResults(frames, a2, result, { manualBall: ballRef });
+          return;
+        }
+      }
+    } catch (e) {
+      if (e.message === 'cancel') { recycle(liveFrames); show('home'); renderHome(); return; }
+      console.warn('ניתוח הסרטון נכשל, משתמשים בניתוח החי', e);
+    }
+  }
+  // גיבוי: הפריימים שנותחו בזמן אמת
+  const result = analyzeKick(liveFrames, aspect, ballRef);
+  showResults(liveFrames, aspect, result, { manualBall: ballRef });
 }
 
 function speakInstruction(instr, t) {
@@ -477,7 +557,7 @@ function drawLive(kid, seenBall) {
       `video ${video.videoWidth}x${video.videoHeight}  rot ${S.rot}  phone ${sensors.landscape == null ? '?' : sensors.landscape ? 'landscape' : 'portrait'}`,
       `kid h ${box ? box.h.toFixed(2) : '-'}  ball ${ball ? `${ball.x.toFixed(2)},${ball.y.toFixed(2)} h${ball.h.toFixed(3)}` : '-'} seen ${seenBall ? 'y' : 'n'}`,
       `roll ${sensors.roll == null ? '-' : sensors.roll.toFixed(1)}  shake ${sensors.shake.toFixed(0)}  light ${S.brightness?.toFixed(0)}`,
-      `buffer ${S.frames.length}  L ${Number.isFinite(S.armL) ? S.armL.toFixed(3) : '-'}`,
+      `buffer ${S.frames.length}  L ${Number.isFinite(S.armL) ? S.armL.toFixed(3) : '-'}  camera ${S.camFps || '?'}fps  rec ${S.rec ? 'on' : 'off'}`,
     ].join('\n');
   } else $('#debug').hidden = true;
 }
@@ -544,53 +624,132 @@ async function seek(v, t) {
   }
 }
 
-async function analyzeFile(file) {
-  unlockSpeech();
-  show('processing');
-  S.cancelProcessing = false;
-  const setProg = (txt, p) => {
-    $('#proc-text').textContent = txt;
-    $('#proc-bar').style.width = `${Math.round(p * 100)}%`;
-  };
-  setProg('טוען את המודלים…', 0);
+// ---------- ניתוח וידאו פריים-אחרי-פריים ----------
+// משמש גם לסרטון שהוקלט באפליקציה וגם לסרטון מהגלריה. כאן אין לחץ זמן אמת, אז מנתחים כל פריים
+// עם המודל המדויק (full). כך מקבלים את כל הפריימים שהמצלמה צילמה, ולא רק את אלה שהספקנו בזמן אמת.
+
+function makeHiddenVideo() {
   const v = document.createElement('video');
   v.muted = true;
   v.playsInline = true;
   v.preload = 'auto';
   v.style.cssText = 'position:fixed;width:2px;height:2px;opacity:0.01;pointer-events:none;bottom:0;left:0';
   document.body.appendChild(v);
-  const url = URL.createObjectURL(file);
-  // מתחילים לטעון את הסרטון מיד (באייפון זה חשוב כל עוד אנחנו בתוך הלחיצה)
+  return v;
+}
+
+function processStill(v, t, rot, st) {
+  const rw = v.videoWidth, rh = v.videoHeight;
+  const src = rotatedSource(rot, rw, rh, v);
+  const vw = rot ? rh : rw, vh = rot ? rw : rh;
+  const poses = detectPoses(src, t, true);
+  const cands = detectBalls(src, t, vw, vh);
+  const kid = selectKid(poses, st.ballTrack, st.prevHip);
+  if (kid) st.prevHip = hipCenter(kid);
+  const b = selectBall(cands, st.ballTrack, kid ? bodyBox(kid)?.h : null);
+  if (b) { st.ballTrack = b; st.miss = 0; } else if (++st.miss > 10) st.ballTrack = null;
+  st.aspect = vw / vh;
+  return { t, pose: kid, ball: b, snap: snapshot(src, vw, vh) };
+}
+
+// מנגנים את הסרטון לאט, ועוצרים על כל פריים כדי לנתח אותו
+function extractByPlayback(v, { start, end, rot, maxFrames, st, onProgress }) {
+  return new Promise((resolve, reject) => {
+    const frames = [];
+    const span = Number.isFinite(end) ? end - start : 0;
+    const stride = span > 0 ? span / maxFrames : 0;
+    let lastT = -1, done = false, lastCb = performance.now();
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearInterval(watchdog);
+      v.pause();
+      resolve(frames);
+    };
+    // אם הדפדפן נתקע – מסיימים עם מה שיש
+    const watchdog = setInterval(() => { if (performance.now() - lastCb > 4000) finish(); }, 1000);
+    v.onended = finish;
+    const cb = async (now, meta) => {
+      if (done) return;
+      lastCb = performance.now();
+      if (S.cancelProcessing) { done = true; clearInterval(watchdog); v.pause(); return reject(new Error('cancel')); }
+      const mt = meta.mediaTime;
+      if (mt > end || frames.length >= maxFrames) return finish();
+      if (mt < start) { v.playbackRate = 4; v.requestVideoFrameCallback(cb); return; }
+      v.playbackRate = 0.3;
+      if (mt > lastT + 1e-4 && mt - lastT >= stride) {
+        v.pause();
+        lastT = mt;
+        try { frames.push(processStill(v, mt * 1000, rot, st)); } catch (e) { console.warn(e); }
+        onProgress?.(span > 0 ? (mt - start) / span : Math.min(0.95, frames.length / 200));
+        v.requestVideoFrameCallback(cb);
+        try { await v.play(); } catch { finish(); }
+        return;
+      }
+      v.requestVideoFrameCallback(cb);
+    };
+    v.requestVideoFrameCallback(cb);
+    v.currentTime = 0;
+    v.play().catch(reject);
+  });
+}
+
+// גיבוי לדפדפנים בלי requestVideoFrameCallback: קפיצה בזמן (seek) לכל פריים
+async function extractBySeek(v, { start, end, rot, maxFrames, st, onProgress }) {
+  const dur = Number.isFinite(v.duration) ? v.duration : end;
+  const to = Math.min(dur, end);
+  const step = Math.max(1 / 30, (to - start) / maxFrames);
+  const frames = [];
+  for (let ts = start; ts < to; ts += step) {
+    if (S.cancelProcessing) throw new Error('cancel');
+    await seek(v, ts);
+    frames.push(processStill(v, ts * 1000, rot, st));
+    onProgress?.((ts - start) / (to - start));
+  }
+  return frames;
+}
+
+async function analyzeVideo(src, { start = 0, end = 15, rot = 0, maxFrames = 280, ballHint = null, onProgress } = {}) {
+  const v = makeHiddenVideo();
+  const url = URL.createObjectURL(src);
   v.src = url;
   v.load();
   const loaded = v.readyState >= 2 ? Promise.resolve() : once(v, 'loadeddata');
   try {
-    await loadModels({ full: true, onStatus: (t) => setProg(t, 0) });
-    setProg('טוען את הסרטון…', 0);
+    await loadModels({ full: true, onStatus: (t) => onProgress?.(0, t) });
     await loaded;
-    try { await v.play(); v.pause(); } catch { /* */ }
-    const vw = v.videoWidth, vh = v.videoHeight;
-    const dur = Number.isFinite(v.duration) ? v.duration : 10;
-    const maxDur = Math.min(dur, 15);
-    const step = Math.max(1 / 30, maxDur / 300);
-    const frames = [];
-    let ballTrack = null, prevHip = null, miss = 0;
-    for (let ts = 0; ts < maxDur; ts += step) {
-      if (S.cancelProcessing) throw new Error('cancel');
-      await seek(v, ts);
-      const t = ts * 1000;
-      const poses = detectPoses(v, t, true);
-      const cands = detectBalls(v, t, vw, vh);
-      const kid = selectKid(poses, ballTrack, prevHip);
-      if (kid) prevHip = hipCenter(kid);
-      const b = selectBall(cands, ballTrack, kid ? bodyBox(kid)?.h : null);
-      if (b) { ballTrack = b; miss = 0; } else if (++miss > 10) ballTrack = null;
-      frames.push({ t, pose: kid, ball: b, snap: snapshot(v, vw, vh) });
-      setProg(`מנתח את התנועה… ${Math.round((ts / maxDur) * 100)}%`, ts / maxDur);
+    const st = { ballTrack: ballHint, prevHip: null, miss: 0, aspect: 16 / 9 };
+    const opts = { start, end, rot, maxFrames, st, onProgress: (p) => onProgress?.(p) };
+    let frames;
+    if (v.requestVideoFrameCallback) frames = await extractByPlayback(v, opts);
+    else {
+      try { await v.play(); v.pause(); } catch { /* */ }
+      frames = await extractBySeek(v, opts);
     }
-    const aspect = vw / vh;
+    return { frames, aspect: st.aspect, duration: v.duration };
+  } finally {
+    URL.revokeObjectURL(url);
+    v.remove();
+  }
+}
+
+function procProgress(label) {
+  return (p, txt) => {
+    $('#proc-text').textContent = txt || `${label} ${Math.round(Math.max(0, Math.min(1, p)) * 100)}%`;
+    $('#proc-bar').style.width = `${Math.round(Math.max(0, Math.min(1, p)) * 100)}%`;
+  };
+}
+
+async function analyzeFile(file) {
+  unlockSpeech();
+  show('processing');
+  S.cancelProcessing = false;
+  const prog = procProgress('מנתח את הסרטון פריים אחרי פריים…');
+  prog(0, 'טוען את המודלים…');
+  try {
+    const { frames, aspect, duration } = await analyzeVideo(file, { start: 0, end: 15, maxFrames: 300, onProgress: prog });
     const result = analyzeKick(frames, aspect);
-    if (dur > 15) toast('נותחו 15 השניות הראשונות. כדאי לחתוך את הסרטון סביב הבעיטה.', 4000);
+    if (duration > 15) toast('נותחו 15 השניות הראשונות. כדאי לחתוך את הסרטון סביב הבעיטה.', 4000);
     showResults(frames, aspect, result, {});
   } catch (e) {
     if (e.message !== 'cancel') {
@@ -599,9 +758,6 @@ async function analyzeFile(file) {
     }
     show('home');
     renderHome();
-  } finally {
-    URL.revokeObjectURL(url);
-    v.remove();
   }
 }
 $('#file-input').addEventListener('change', (e) => {
@@ -623,6 +779,14 @@ function showResults(frames, aspect, result, { manualBall = null } = {}) {
   const range = $('#v-range');
   range.max = String(Math.max(0, frames.length - 1));
   renderResult();
+}
+
+function qualityLine(r) {
+  const q = r.quality || {};
+  const parts = [];
+  if (q.fps) parts.push(`נותחו ${q.frames} פריימים, כ-${q.fps} בשנייה סביב הבעיטה`);
+  if (q.fps && q.fps < 25) parts.push('קצב נמוך – לדיוק טוב יותר כדאי לצלם בהילוך איטי ולהעלות מהגלריה');
+  return parts.join('. ');
 }
 
 function fmtMetric(id, m) {
@@ -668,9 +832,9 @@ function renderResult() {
   const li = (arr) => arr.map((x) => `<li>${esc(x.text)}</li>`).join('');
   const rows = Object.entries(result.metrics)
     .map(([id, m]) => {
-      const cls = m.status === 'good' ? 'good' : m.status === 'na' ? 'na' : 'bad';
-      const st = m.status === 'good' ? '✓ טוב' : m.status === 'na' ? '—' : 'לשפר';
-      return `<tr><td>${METRIC_NAMES[id]}</td><td>${esc(fmtMetric(id, m))}</td><td class="st ${cls}">${st}</td></tr>`;
+      const cls = m.status === 'good' || m.status === 'ok' ? 'good' : m.status === 'na' ? 'na' : 'bad';
+      const st = { good: '✓ טוב', ok: 'בסדר', na: 'לא נמדד' }[m.status] || 'לשפר';
+      return `<tr><td>${METRIC_NAMES[id]}</td><td>${esc(fmtMetric(id, m))}${m.reason ? `<br><small class="note">${esc(m.reason)}</small>` : ''}</td><td class="st ${cls}">${st}</td></tr>`;
     })
     .join('');
   const prev = getHistory()[0];
@@ -687,8 +851,22 @@ function renderResult() {
     <details class="card"><summary>פירוט המדידות</summary>
       <table class="metrics">${rows}</table>
       <p class="note" style="margin-top:8px">המדידה מבוססת על צילום דו-ממדי מהצד ומשמשת כהכוונה, לא כשיפוט מדויק.</p>
+      <p class="note">${esc(qualityLine(result))}</p>
+      <button class="btn small" id="btn-copy-data" type="button">📋 העתק נתוני מדידה</button>
     </details>`;
   S.res.speech = fb.speech;
+  $('#btn-copy-data').addEventListener('click', async () => {
+    const data = {
+      app: 'penalty-coach',
+      date: new Date().toISOString(),
+      quality: result.quality && { fps: result.quality.fps, swaps: result.quality.swaps, frames: result.quality.frames },
+      L: +result.L.toFixed(4),
+      dir: result.dir,
+      metrics: Object.fromEntries(Object.entries(result.metrics).map(([k, m]) => [k, { value: Number.isFinite(m.value) ? +m.value.toFixed(3) : null, status: m.status }])),
+    };
+    try { await navigator.clipboard.writeText(JSON.stringify(data)); toast('הנתונים הועתקו. אפשר להדביק ולשלוח'); }
+    catch { toast('לא הצלחתי להעתיק'); }
+  });
   speak(fb.speech);
   drawViewer();
 }
@@ -704,9 +882,10 @@ function drawViewer() {
   const rect = containRect(f.snap?.width || 16, f.snap?.height || 9, w, h);
   if (f.snap) vctx.drawImage(f.snap, rect.x, rect.y, rect.w, rect.h);
   const kickSide = result.ok ? result.kickSide : null;
-  drawSkeleton(vctx, f.pose, rect, { kickSide });
+  const pose = (result.ok && result.clean?.get(f)) || f.pose;
+  drawSkeleton(vctx, pose, rect, { kickSide });
   const ballRef = result.ok ? result.ballRef : S.res.manualBall;
-  if (result.ok && idx === result.contactIdx) drawContactMarks(vctx, f, result, rect);
+  if (result.ok && idx === result.contactIdx) drawContactMarks(vctx, { ...f, pose }, result, rect);
   drawBall(vctx, f.ball || (idx <= (result.contactIdx ?? 0) ? ballRef : null), rect);
   // מונה פריימים + סימון רגע הבעיטה
   vctx.fillStyle = 'rgba(0,0,0,.55)';
@@ -733,19 +912,32 @@ $('#v-contact').addEventListener('click', () => {
   if (S.res?.result.ok) setIdx(S.res.result.contactIdx);
 });
 let playTimer = null;
+const SPEEDS = [0.25, 0.5, 1];
+let speedIdx = 0;
 function stopPlay() {
-  clearInterval(playTimer);
+  clearTimeout(playTimer);
   playTimer = null;
   $('#v-play').textContent = '▶';
+}
+function playStep() {
+  const { frames, idx } = S.res;
+  if (idx >= frames.length - 1) return stopPlay();
+  // מהירות לפי הזמן האמיתי בין הפריימים, מוכפל בהילוך האיטי שנבחר
+  const dt = (frames[idx + 1].t - frames[idx].t) / SPEEDS[speedIdx];
+  playTimer = setTimeout(() => {
+    setIdx(S.res.idx + 1);
+    playStep();
+  }, Math.max(16, Math.min(600, dt)));
 }
 $('#v-play').addEventListener('click', () => {
   if (playTimer) return stopPlay();
   if (S.res.idx >= S.res.frames.length - 1) setIdx(0);
   $('#v-play').textContent = '⏸';
-  playTimer = setInterval(() => {
-    if (S.res.idx >= S.res.frames.length - 1) return stopPlay();
-    setIdx(S.res.idx + 1);
-  }, 130); // הילוך איטי
+  playStep();
+});
+$('#v-speed').addEventListener('click', () => {
+  speedIdx = (speedIdx + 1) % SPEEDS.length;
+  $('#v-speed').textContent = ['×¼', '×½', '×1'][speedIdx];
 });
 viewer.addEventListener('click', (ev) => {
   if (!S.res?.awaitingBall) return;

@@ -50,9 +50,10 @@ export function buildFeedback(result, { gender = 'm', name = '' } = {}) {
   const good = [], improve = [];
   for (const id of ORDER) {
     const m = result.metrics[id];
-    if (!m || m.status === 'na') continue;
+    // 'ok' = בסדר: לא משבחים ולא מעירים. 'na' = לא נמדד בביטחון.
+    if (!m || m.status === 'na' || m.status === 'ok') continue;
     if (m.status === 'good') good.push({ id, text: T[id].good.say, keep: T[id].good.keep });
-    else improve.push({ id, text: T[id][m.status] });
+    else if (T[id][m.status]) improve.push({ id, text: T[id][m.status] });
   }
 
   const keep = good.length ? good[0].keep : g('תמשיך להתאמן, כל בעיטה משפרת', 'תמשיכי להתאמן, כל בעיטה משפרת');

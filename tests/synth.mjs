@@ -13,6 +13,7 @@ export function synthKick({
   runupL = 5,
   fps = 30,
   ballMoves = true,
+  plantVis = 0.95, // ביטחון בנקודות רגל התמיכה (לבדיקת רגל מוסתרת)
 } = {}) {
   const l = 0.11; // ירך = שוק
   const L = 2 * l;
@@ -43,8 +44,10 @@ export function synthKick({
   const hipYc = ground - Math.sqrt(Math.max(0, dPlant ** 2 - (plantA.x - hipXc) ** 2));
   const hipYrun = ground - dFromAngle(165);
 
-  for (let t = 0; t <= 2200; t += 1000 / fps) {
-    const s = Math.min(1, t / (tc - 150));
+  // מייצרים ב-240 פריימים לשנייה, מחליקים (גוף אמיתי לא "קופץ"), ואז דוגמים לקצב המבוקש
+  const HI = 240;
+  for (let t = 0; t <= 2200; t += 1000 / HI) {
+    const s = Math.min(1, Math.max(0, (t - 400) / (tc - 150 - 400))); // עומד במקום 0.4 שניות ואז רץ
     const hipX = hipXstart + (hipXc - hipXstart) * s + (t > tc ? dir * 0.1 * L * ((t - tc) / 300) : 0);
     const nearC = Math.min(1, Math.max(0, 1 - (Math.abs(t - tc) - 150) / 300));
     const H = { x: hipX, y: hipYrun + (hipYc - hipYrun) * nearC };
@@ -62,13 +65,13 @@ export function synthKick({
       const d = dFromAngle(backswingKnee);
       KA = { x: H.x - dir * d * 0.7, y: H.y + d * 0.71 }; // מאחור ולמעלה
     } else if (t <= tc) {
-      // תנועת מטוטלת: מעבירים את זווית הירך ואת המרחק בהדרגה, בלי לכופף את הברך יותר מההנפה
-      const d0 = dFromAngle(backswingKnee);
+      // תנועת מטוטלת: מעבירים את זווית הברך ואת כיוון השוק בהדרגה (הברך לא מתכופפת יותר מבהנפה)
       const to = { x: B.x - dir * 0.02, y: ground - 0.02 };
       const d1 = Math.hypot(to.x - H.x, to.y - H.y);
+      const k1 = (Math.acos(Math.max(-1, Math.min(1, 1 - (d1 * d1) / (2 * l * l)))) * 180) / Math.PI;
       const a0 = Math.atan2(-0.7, 0.71), a1 = Math.atan2(dir * (to.x - H.x), to.y - H.y);
       const p = (t - (tc - 120)) / 120;
-      const d = d0 + (d1 - d0) * p, a = a0 + (a1 - a0) * p;
+      const d = dFromAngle(backswingKnee + (k1 - backswingKnee) * p), a = a0 + (a1 - a0) * p;
       KA = { x: H.x + dir * Math.sin(a) * d, y: H.y + Math.cos(a) * d };
     }
     else {
@@ -96,11 +99,24 @@ export function synthKick({
     set(29, { x: KA.x - dir * 0.015, y: KA.y }); set(30, { x: PA.x - dir * 0.015, y: PA.y });
     set(31, { x: KA.x + dir * 0.03, y: KA.y }); set(32, { x: PA.x + dir * 0.03, y: PA.y });
 
-    const pose = pts.map((p) => ({ x: p.x / W, y: p.y, z: 0, visibility: 0.95 }));
+    const pose = pts.map((p, i) => ({ x: p.x / W, y: p.y, z: 0, visibility: [24, 26, 28, 30, 32].includes(i) ? plantVis : 0.95 }));
     let ballPos = { ...B };
     if (ballMoves && t > tc + 30) ballPos = { x: B.x + dir * (t - tc) * 0.002, y: B.y - (t - tc) * 0.0003 };
     const ball = ballPos.x > 0 && ballPos.x < W ? { x: ballPos.x / W, y: ballPos.y, w: (2 * ballR) / W, h: 2 * ballR } : null;
     frames.push({ t, pose, ball });
   }
-  return { frames, aspect, tc };
+  const half = 12; // ~50ms לכל צד
+  const smooth = frames.map((f, i) => {
+    const nb = frames.slice(Math.max(0, i - half), i + half + 1);
+    const pose = f.pose.map((p, j) => ({
+      ...p,
+      x: nb.reduce((s, g) => s + g.pose[j].x, 0) / nb.length,
+      y: nb.reduce((s, g) => s + g.pose[j].y, 0) / nb.length,
+    }));
+    return { ...f, pose };
+  });
+  const step = HI / fps;
+  const out = [];
+  for (let k = 0; k < smooth.length; k += step) out.push(smooth[Math.round(k)]);
+  return { frames: out.filter(Boolean), aspect, tc };
 }
