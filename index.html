@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b3d2a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="description" content="מאמן פנדלים: מצלמים בעיטה, והאפליקציה מנתחת את התנועה ונותנת משוב קולי." />
+  <title>מאמן פנדלים</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- ===== מסך בית ===== -->
+  <section id="home" class="screen active">
+    <header class="home-head">
+      <div class="logo" aria-hidden="true">⚽</div>
+      <div>
+        <h1>מאמן פנדלים</h1>
+        <p class="sub" id="greeting">מצלמים בעיטה ומקבלים משוב על התנועה</p>
+      </div>
+      <button class="icon-btn" id="btn-settings" aria-label="הגדרות">⚙️</button>
+    </header>
+
+    <div class="actions">
+      <button class="big-btn primary" id="btn-camera">
+        <span class="big-ico">📷</span>
+        <span><b>צלם בעיטה</b><small>האפליקציה תכוון אותך למקום הנכון</small></span>
+      </button>
+      <label class="big-btn" for="file-input">
+        <span class="big-ico">🎞️</span>
+        <span><b>נתח סרטון מהגלריה</b><small>מומלץ: צילום בהילוך איטי במצלמה הרגילה</small></span>
+      </label>
+      <input type="file" id="file-input" accept="video/*" hidden />
+    </div>
+
+    <details class="card how" open>
+      <summary>איך מצלמים נכון?</summary>
+      <svg viewBox="0 0 320 145" class="how-svg" aria-hidden="true">
+        <rect x="0" y="0" width="320" height="145" rx="12" fill="#0f5132" />
+        <rect x="282" y="35" width="10" height="60" fill="#fff" opacity=".9" />
+        <text x="270" y="25" fill="#cfe" font-size="11" text-anchor="middle">שער</text>
+        <circle cx="200" cy="65" r="7" fill="#fff" />
+        <text x="200" y="50" fill="#cfe" font-size="11" text-anchor="middle">כדור</text>
+        <circle cx="120" cy="65" r="9" fill="#ffca28" />
+        <text x="120" y="48" fill="#cfe" font-size="11" text-anchor="middle">בועט</text>
+        <path d="M132 65 H186" stroke="#ffca28" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#a)" />
+        <rect x="150" y="105" width="22" height="14" rx="3" fill="#4fc3f7" />
+        <text x="161" y="136" fill="#cfe" font-size="11" text-anchor="middle">מצלם</text>
+        <path d="M161 103 L130 78 M161 103 L195 78" stroke="#4fc3f7" stroke-width="1.5" opacity=".7" />
+        <defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#ffca28" /></marker></defs>
+      </svg>
+      <ol>
+        <li>המצלם עומד <b>בצד</b>, בניצב לכיוון הבעיטה, 4–6 מטרים מהכדור.</li>
+        <li>מחזיקים את הטלפון <b>לרוחב</b>, יציב, בגובה המותניים.</li>
+        <li>האפליקציה אומרת לאן לזוז. כשהמסגרת ירוקה ונשמע "מוכן" – בועטים. ההקלטה מתחילה ונעצרת לבד.</li>
+      </ol>
+    </details>
+
+    <section class="card" id="history-card" hidden>
+      <h2>בעיטות אחרונות</h2>
+      <ul id="history-list" class="history"></ul>
+    </section>
+
+    <p class="foot">הסרטונים לא יוצאים מהטלפון. כל הניתוח נעשה במכשיר.</p>
+  </section>
+
+  <!-- ===== מסך מצלמה ===== -->
+  <section id="camera" class="screen camera">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+
+    <div class="cam-top">
+      <button class="icon-btn dark" id="btn-close" aria-label="סגור">✕</button>
+      <div class="banner" id="banner">
+        <span class="arrow" id="arrow" aria-hidden="true"></span>
+        <span id="instruction">טוען…</span>
+      </div>
+      <span class="pill" id="phase-pill">כיוון</span>
+    </div>
+
+    <div class="cam-bottom">
+      <ul class="chips" id="chips"></ul>
+      <div class="cam-buttons">
+        <button class="btn" id="btn-clear-ball" hidden>בטל סימון כדור</button>
+        <button class="btn accent" id="btn-record-now">הקלט עכשיו</button>
+        <button class="btn danger" id="btn-stop" hidden>עצור ונתח</button>
+      </div>
+      <p class="tap-hint" id="tap-hint">לא מזהה את הכדור? הקש עליו במסך</p>
+    </div>
+    <pre class="debug" id="debug" hidden></pre>
+  </section>
+
+  <!-- ===== מסך עיבוד ===== -->
+  <section id="processing" class="screen center">
+    <div class="spinner" aria-hidden="true"></div>
+    <p id="proc-text">מעבד…</p>
+    <div class="progress"><div id="proc-bar"></div></div>
+    <button class="btn" id="btn-proc-cancel">ביטול</button>
+  </section>
+
+  <!-- ===== מסך תוצאות ===== -->
+  <section id="results" class="screen">
+    <header class="res-head">
+      <button class="icon-btn" id="btn-res-home" aria-label="בית">🏠</button>
+      <div>
+        <div class="stars" id="stars"></div>
+        <h2 id="res-title"></h2>
+      </div>
+      <button class="icon-btn" id="btn-say" aria-label="השמע שוב">🔊</button>
+    </header>
+
+    <div class="viewer">
+      <canvas id="viewer"></canvas>
+      <p class="viewer-hint" id="viewer-hint" hidden></p>
+      <div class="viewer-controls" dir="ltr">
+        <button class="icon-btn" id="v-prev" aria-label="פריים קודם">⏴</button>
+        <button class="icon-btn" id="v-play" aria-label="נגן לאט">▶</button>
+        <button class="icon-btn" id="v-next" aria-label="פריים הבא">⏵</button>
+        <input type="range" id="v-range" min="0" max="0" value="0" dir="ltr" aria-label="מיקום בסרטון" />
+        <button class="btn small" id="v-contact">רגע הבעיטה</button>
+      </div>
+      <div class="legend"><span class="sw kick"></span>רגל הבעיטה <span class="sw plant"></span>רגל התמיכה <span class="sw ball"></span>כדור</div>
+    </div>
+
+    <div id="res-body"></div>
+
+    <div class="res-actions">
+      <button class="big-btn primary" id="btn-again"><span class="big-ico">⚽</span><span><b>בעיטה נוספת</b></span></button>
+    </div>
+  </section>
+
+  <!-- ===== הגדרות ===== -->
+  <dialog id="settings">
+    <form method="dialog" class="settings-form">
+      <h2>הגדרות</h2>
+      <label>שם השחקן <input type="text" id="set-name" maxlength="20" placeholder="לא חובה" /></label>
+      <fieldset>
+        <legend>פנייה</legend>
+        <label class="inline"><input type="radio" name="gender" value="m" /> בן</label>
+        <label class="inline"><input type="radio" name="gender" value="f" /> בת</label>
+      </fieldset>
+      <label class="inline"><input type="checkbox" id="set-voice" /> הוראות ומשוב קוליים</label>
+      <label class="inline"><input type="checkbox" id="set-front" /> מצלמה קדמית (צילום עצמי)</label>
+      <label class="inline"><input type="checkbox" id="set-debug" /> הצג נתונים טכניים</label>
+      <p class="note" id="voice-note"></p>
+      <div class="row">
+        <button class="btn" id="btn-clear-history" type="button">מחק היסטוריה</button>
+        <button class="btn accent" value="ok">שמור</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
