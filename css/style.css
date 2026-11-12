@@ -114,6 +114,10 @@ h1 { font-size: 28px; font-weight: 800; }
 .tap-hint { margin: 0; text-align: center; font-size: 13px; color: #ddd; text-shadow: 0 1px 2px #000; }
 .debug { position: absolute; top: 80px; left: 8px; margin: 0; padding: 6px 8px; background: rgba(0,0,0,.6); font: 11px/1.4 ui-monospace, monospace; direction: ltr; text-align: left; border-radius: 8px; pointer-events: none; }
 
+/* כשנעילת הסיבוב דולקת והטלפון מוחזק לרוחב – מסובבים את הכיתובים כדי שיהיה אפשר לקרוא */
+.cam-ui { position: absolute; inset: 0; pointer-events: none; }
+.cam-ui.rotated { inset: auto; top: 50%; left: 50%; width: 100vh; height: 100vw; transform: translate(-50%, -50%) rotate(var(--rot)); }
+
 /* ===== עיבוד ===== */
 .spinner { width: 56px; height: 56px; border-radius: 50%; border: 6px solid var(--line); border-top-color: var(--accent); animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

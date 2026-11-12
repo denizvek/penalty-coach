@@ -1,6 +1,7 @@
 // חיישני הטלפון: האם הטלפון ישר (roll) והאם הוא רועד (shake).
 
-export const sensors = { roll: null, shake: 0, available: false };
+// landscape: האם הטלפון מוחזק פיזית לרוחב (לפי כוח הכובד). null = לא ידוע
+export const sensors = { roll: null, shake: 0, available: false, landscape: null };
 let started = false;
 
 function onMotion(e) {
@@ -13,6 +14,9 @@ function onMotion(e) {
       let d = ((theta % 90) + 90) % 90;
       if (d > 45) d -= 90;
       sensors.roll = d;
+      const ax = Math.abs(g.x), ay = Math.abs(g.y);
+      if (ax > ay * 1.3) sensors.landscape = true;
+      else if (ay > ax * 1.3) sensors.landscape = false;
     } else sensors.roll = null;
     sensors.available = true;
   }

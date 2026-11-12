@@ -29,6 +29,8 @@ const S = {
   ballTrack: null,
   ballMiss: 0,
   prevHip: null,
+  rot: 0, // סיבוב הפריים לזיהוי: 0, 90 או -90
+  rotBad: 0,
   readySince: 0,
   armedAt: 0,
   armRef: null,
@@ -160,6 +162,7 @@ function resetLive() {
   S.kickAt = 0;
   S.armRef = null;
   S.frameNo = 0;
+  S.rotBad = 0;
   S.speech = { pendingId: '', pendingSince: 0, lastId: '', lastAt: 0 };
   $('#btn-stop').hidden = true;
   $('#btn-record-now').hidden = false;
@@ -240,23 +243,100 @@ function trackBall(cands, kidH) {
   return null;
 }
 
-function processLive(t) {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || !vh) return;
-  S.aspect = vw / vh;
-  S.frameNo++;
+// ---------- סיבוב ----------
+// כשנעילת הסיבוב של הטלפון דולקת, המצלמה ממשיכה לשלוח פריים "לאורך" גם כשמחזיקים את הטלפון לרוחב.
+// במקרה כזה מסובבים את הפריים בעצמנו לפני הזיהוי, ומסובבים גם את הכיתובים על המסך.
+const rotCanvas = document.createElement('canvas');
 
-  const poses = detectPoses(video, t);
+function rotCandidates(rawPortrait) {
+  if (!rawPortrait) return [0];
+  if (sensors.landscape === true) return [90, -90];
+  if (sensors.landscape === false) return [0];
+  return [0, 90, -90]; // אין חיישנים – מנסים לפי מה שהזיהוי מוצא
+}
+
+// האם הילד "עומד" בפריים (כתפיים מעל האגן)
+function upright(lm, aspect) {
+  const sh = { x: (lm[11].x + lm[12].x) / 2, y: (lm[11].y + lm[12].y) / 2 };
+  const hp = { x: (lm[23].x + lm[24].x) / 2, y: (lm[23].y + lm[24].y) / 2 };
+  const dy = hp.y - sh.y, dx = (hp.x - sh.x) * aspect;
+  return dy > 0 && dy > Math.abs(dx) * 0.7;
+}
+
+function updateRotation(rawPortrait, kid, aspect) {
+  const cands = rotCandidates(rawPortrait);
+  if (!cands.includes(S.rot)) { S.rot = cands[0]; S.rotBad = 0; return; }
+  if (S.phase !== 'framing' || cands.length === 1) return;
+  if (kid && upright(kid, aspect)) { S.rotBad = 0; return; }
+  // הילד הפוך/שוכב או לא נמצא – אחרי כמה פריימים מנסים את הסיבוב הבא
+  S.rotBad += kid ? 3 : 1;
+  if (S.rotBad >= 12) {
+    S.rot = cands[(cands.indexOf(S.rot) + 1) % cands.length];
+    S.rotBad = 0;
+  }
+}
+
+function rotatedSource(rot, rw, rh) {
+  if (!rot) return video;
+  if (rotCanvas.width !== rh || rotCanvas.height !== rw) { rotCanvas.width = rh; rotCanvas.height = rw; }
+  const c = rotCanvas.getContext('2d');
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  if (rot === 90) { c.translate(rh, 0); c.rotate(Math.PI / 2); }
+  else { c.translate(0, rw); c.rotate(-Math.PI / 2); }
+  c.drawImage(video, 0, 0, rw, rh);
+  return rotCanvas;
+}
+
+// מקואורדינטות הפריים המסובב לקואורדינטות הווידאו המקורי (בשביל הציור על המסך) ובחזרה
+function toRaw(p, rot) {
+  if (!rot) return p;
+  return rot === 90 ? { ...p, x: p.y, y: 1 - p.x } : { ...p, x: 1 - p.y, y: p.x };
+}
+function fromRaw(p, rot) {
+  if (!rot) return p;
+  return rot === 90 ? { x: 1 - p.y, y: p.x } : { x: p.y, y: 1 - p.x };
+}
+function ballToRaw(b, rot) {
+  if (!b || !rot) return b;
+  return { ...toRaw(b, rot), w: b.h, h: b.w };
+}
+
+function applyUiRotation() {
+  // מסובבים את הכיתובים רק כשהמסך עצמו נשאר לאורך
+  const r = S.rot && window.innerHeight > window.innerWidth ? S.rot : 0;
+  const ui = $('#cam-ui');
+  if (ui.dataset.rot !== String(r)) {
+    ui.dataset.rot = String(r);
+    ui.classList.toggle('rotated', !!r);
+    ui.style.setProperty('--rot', `${r}deg`);
+  }
+}
+
+function processLive(t) {
+  const rw = video.videoWidth, rh = video.videoHeight;
+  if (!rw || !rh) return;
+  S.frameNo++;
+  const rawPortrait = rw < rh;
+  if (!rotCandidates(rawPortrait).includes(S.rot)) updateRotation(rawPortrait, null, rw / rh);
+  const src = rotatedSource(S.rot, rw, rh);
+  const vw = S.rot ? rh : rw, vh = S.rot ? rw : rh;
+  S.aspect = vw / vh;
+  applyUiRotation();
+
+  const poses = detectPoses(src, t);
   const every = S.phase === 'recording' ? 2 : CONFIG.ballEveryNFrames;
-  const cands = S.frameNo % every === 0 ? detectBalls(video, t, vw, vh) : null;
+  const cands = S.frameNo % every === 0 ? detectBalls(src, t, vw, vh) : null;
   const refBall = S.ballManual || S.ballTrack;
   const kid = selectKid(poses, refBall, S.phase === 'recording' ? S.prevHip : null);
   S.prevHip = kid ? hipCenter(kid) : S.prevHip;
   const kidBox = kid ? bodyBox(kid) : null;
   const seenBall = trackBall(cands, kidBox?.h);
+  const rotBefore = S.rot;
+  updateRotation(rawPortrait, kid, S.aspect);
+  if (S.rot !== rotBefore) { S.ballTrack = null; S.ballManual = null; S.prevHip = null; updateBallButtons(); }
   if (S.frameNo % 15 === 1) S.brightness = measureBrightness();
 
-  const frame = { t, pose: kid, ball: seenBall, snap: snapshot(video, vw, vh) };
+  const frame = { t, pose: kid, ball: seenBall, snap: snapshot(src, vw, vh) };
 
   if (S.phase === 'framing') {
     // שומרים שנייה וחצי אחרונה, למקרה שהילד מתחיל לרוץ מיד
@@ -385,16 +465,16 @@ function drawLive(kid, seenBall) {
   octx.strokeStyle = S.phase === 'recording' ? '#ef5350' : ready ? '#66bb6a' : 'rgba(255,202,40,.8)';
   octx.lineWidth = 6;
   octx.strokeRect(rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
-  drawSkeleton(octx, kid, rect);
+  drawSkeleton(octx, kid && S.rot ? kid.map((p) => toRaw(p, S.rot)) : kid, rect);
   const ball = S.ballManual || S.ballTrack;
-  drawBall(octx, ball, rect, { manual: !!S.ballManual, label: S.ballManual && settings.facing !== 'user' ? 'כדור (סומן)' : '' });
+  drawBall(octx, ballToRaw(ball, S.rot), rect, { manual: !!S.ballManual, label: S.ballManual && settings.facing !== 'user' ? 'כדור (סומן)' : '' });
   if (settings.debug) {
     const dbg = $('#debug');
     dbg.hidden = false;
     const box = kid ? bodyBox(kid) : null;
     dbg.textContent = [
       `phase ${S.phase}  frame ${S.frameNo}`,
-      `video ${video.videoWidth}x${video.videoHeight}`,
+      `video ${video.videoWidth}x${video.videoHeight}  rot ${S.rot}  phone ${sensors.landscape == null ? '?' : sensors.landscape ? 'landscape' : 'portrait'}`,
       `kid h ${box ? box.h.toFixed(2) : '-'}  ball ${ball ? `${ball.x.toFixed(2)},${ball.y.toFixed(2)} h${ball.h.toFixed(3)}` : '-'} seen ${seenBall ? 'y' : 'n'}`,
       `roll ${sensors.roll == null ? '-' : sensors.roll.toFixed(1)}  shake ${sensors.shake.toFixed(0)}  light ${S.brightness?.toFixed(0)}`,
       `buffer ${S.frames.length}  L ${Number.isFinite(S.armL) ? S.armL.toFixed(3) : '-'}`,
@@ -414,8 +494,9 @@ function tapToBall(ev, canvas, vw, vh) {
 }
 overlay.addEventListener('click', (ev) => {
   if (S.phase !== 'framing' || !video.videoWidth) return;
-  const p = tapToBall(ev, overlay, video.videoWidth, video.videoHeight);
-  if (!p) return;
+  const raw = tapToBall(ev, overlay, video.videoWidth, video.videoHeight);
+  if (!raw) return;
+  const p = fromRaw(raw, S.rot);
   const kidH = S.frames.length && S.frames[S.frames.length - 1].pose ? bodyBox(S.frames[S.frames.length - 1].pose)?.h : null;
   const h = kidH ? kidH * 0.13 : 0.05;
   S.ballManual = { x: p.x, y: p.y, w: h / S.aspect, h };

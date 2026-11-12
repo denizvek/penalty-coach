@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0b3d2a" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="description" content="מאמן פנדלים: מצלמים בעיטה, והאפליקציה מנתחת את התנועה ונותנת משוב קולי." />
@@ -73,6 +74,7 @@
     <video id="video" playsinline muted autoplay></video>
     <canvas id="overlay"></canvas>
 
+    <div id="cam-ui" class="cam-ui">
     <div class="cam-top">
       <button class="icon-btn dark" id="btn-close" aria-label="סגור">✕</button>
       <div class="banner" id="banner">
@@ -90,6 +92,7 @@
         <button class="btn danger" id="btn-stop" hidden>עצור ונתח</button>
       </div>
       <p class="tap-hint" id="tap-hint">לא מזהה את הכדור? הקש עליו במסך</p>
+    </div>
     </div>
     <pre class="debug" id="debug" hidden></pre>
   </section>
