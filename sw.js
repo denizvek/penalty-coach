@@ -1,7 +1,7 @@
 // Service worker: קבצי האפליקציה – קודם רשת (כדי לקבל עדכונים), ואם אין רשת – מהמטמון.
 // המודלים והמנוע מה-CDN – קודם מהמטמון, כי הם כבדים ולא משתנים (הגרסה נעולה).
 
-const APP_CACHE = 'pc-app-v3';
+const APP_CACHE = 'pc-app-v4';
 const MODEL_CACHE = 'pc-models-v1';
 const APP_FILES = [
   './',
@@ -20,6 +20,7 @@ const APP_FILES = [
   'js/speech.js',
   'js/draw.js',
   'js/store.js',
+  'js/ai.js',
 ];
 
 self.addEventListener('install', (e) => {

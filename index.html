@@ -143,12 +143,15 @@
     <form method="dialog" class="settings-form">
       <h2>הגדרות</h2>
       <label>שם השחקן <input type="text" id="set-name" maxlength="20" placeholder="לא חובה" /></label>
+      <label>גיל <input type="text" id="set-age" inputmode="numeric" maxlength="2" placeholder="לא חובה" /></label>
       <fieldset>
         <legend>פנייה</legend>
         <label class="inline"><input type="radio" name="gender" value="m" /> בן</label>
         <label class="inline"><input type="radio" name="gender" value="f" /> בת</label>
       </fieldset>
       <label class="inline"><input type="checkbox" id="set-voice" /> הוראות ומשוב קוליים</label>
+      <label class="inline"><input type="checkbox" id="set-ai" /> המאמן החכם (Claude) – ניתוח מדויק יותר</label>
+      <p class="note">כשהמאמן החכם פעיל, 5 תמונות מוקטנות מהבעיטה (חתוכות סביב הילד) נשלחות לניתוח בשרת. הסרטון עצמו לא נשלח ולא נשמר.</p>
       <label class="inline"><input type="checkbox" id="set-front" /> מצלמה קדמית (צילום עצמי)</label>
       <label class="inline"><input type="checkbox" id="set-debug" /> הצג נתונים טכניים</label>
       <p class="note" id="voice-note"></p>

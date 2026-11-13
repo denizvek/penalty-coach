@@ -24,7 +24,15 @@ async function create(Cls, options) {
   }
 }
 
-export async function loadModels({ full = false, onStatus = () => {} } = {}) {
+// קריאות במקביל נכנסות לתור, כדי לא לטעון את אותו מודל פעמיים
+let queue = Promise.resolve();
+export function loadModels(opts = {}) {
+  const run = queue.then(() => loadModelsNow(opts));
+  queue = run.catch(() => {});
+  return run;
+}
+
+async function loadModelsNow({ full = false, onStatus = () => {} } = {}) {
   if (!mp) {
     onStatus('טוען את מנוע הזיהוי…');
     mp = await import(CONFIG.mpBundle);

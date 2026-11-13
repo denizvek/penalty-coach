@@ -8,6 +8,7 @@ import { buildFeedback, errorMessage, METRIC_NAMES } from './feedback.js';
 import { drawSkeleton, drawBall, drawContactMarks, containRect } from './draw.js';
 import { sensors, startSensors } from './sensors.js';
 import { speak, stopSpeech, unlockSpeech, setSpeechEnabled, hasHebrewVoice, speechSupported } from './speech.js';
+import { reviewKick, aiConfigured, aiSpeech } from './ai.js';
 import { getSettings, saveSettings, getHistory, addHistory, clearHistory } from './store.js';
 import { bodyBox, hipCenter, legLength, median } from './geom.js';
 
@@ -87,6 +88,8 @@ function openSettings() {
   $('#set-voice').checked = settings.voice;
   $('#set-front').checked = settings.facing === 'user';
   $('#set-debug').checked = settings.debug;
+  $('#set-ai').checked = settings.ai;
+  $('#set-age').value = settings.age || '';
   $('#voice-note').textContent = !speechSupported()
     ? 'הדפדפן הזה לא תומך בהקראה.'
     : hasHebrewVoice()
@@ -103,6 +106,8 @@ $('#settings').addEventListener('close', () => {
     voice: $('#set-voice').checked,
     facing: $('#set-front').checked ? 'user' : 'environment',
     debug: $('#set-debug').checked,
+    ai: $('#set-ai').checked,
+    age: $('#set-age').value.replace(/\D/g, '').slice(0, 2),
   };
   saveSettings(settings);
   setSpeechEnabled(settings.voice);
@@ -148,6 +153,8 @@ async function openCamera() {
     await video.play();
     requestWakeLock();
     scheduleFrame();
+    // טוענים ברקע את המודל המדויק, כדי שהניתוח אחרי הבעיטה יתחיל מיד
+    setTimeout(() => loadModels({ full: true }).catch(() => {}), 1500);
   } catch (e) {
     console.error(e);
     const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
@@ -217,8 +224,7 @@ function onFrame() {
 
 // תמונות קטנות של הפריימים לצפייה חוזרת. משתמשים מחדש בקנבסים כדי לחסוך זיכרון.
 const snapPool = [];
-function snapshot(src, w, h) {
-  const sw = CONFIG.snapshotWidth;
+function snapshot(src, w, h, sw = CONFIG.snapshotWidth) {
   const sh = Math.round((sw * h) / w);
   const c = snapPool.pop() || document.createElement('canvas');
   if (c.width !== sw || c.height !== sh) { c.width = sw; c.height = sh; }
@@ -226,7 +232,7 @@ function snapshot(src, w, h) {
   return c;
 }
 function recycle(frames) {
-  for (const f of frames) if (f.snap && snapPool.length < 60) snapPool.push(f.snap);
+  for (const f of frames) if (f.snap && f.snap.width === CONFIG.snapshotWidth && snapPool.length < 60) snapPool.push(f.snap);
 }
 
 const lumaCanvas = document.createElement('canvas');
@@ -461,17 +467,24 @@ async function finishRecording() {
   if (recorded && recorded.blob.size > 0) {
     show('processing');
     S.cancelProcessing = false;
-    const prog = procProgress('מנתח את הבעיטה פריים אחרי פריים…');
+    const prog = procProgress('מנתח את הבעיטה…');
+    prog(0, 'מנתח את הבעיטה…');
+    const vid = await openVideo(recorded.blob);
     try {
-      const kickV = (kickAt - recorded.startedAt) / 1000;
-      const { frames, aspect: a2 } = await analyzeVideo(recorded.blob, {
-        start: Math.max(0, kickV - 4),
-        end: kickV + 1.3,
-        rot,
-        maxFrames: 280,
-        ballHint: ballRef,
-        onProgress: prog,
+      await Promise.all([vid.loaded, loadModels({ full: true, onStatus: (t) => prog(0, t) })]);
+      // רגע המגע המשוער: מהניתוח החי אם הצליח, אחרת מרגע זיהוי הבעיטה
+      const live = analyzeKick(liveFrames, aspect, ballRef);
+      const cPerf = live.ok ? liveFrames[live.contactIdx].t : kickAt - 120;
+      const cV = (cPerf - recorded.startedAt) / 1000;
+      // לפני הבעיטה: פריים כל ~70ms (ריצה). סביב הבעיטה: כל פריים. אחרי: כל ~40ms
+      const start = Math.max(0, cV - 2.2), end = cV + 0.7;
+      const stride = (mt) => (mt < cV - 0.45 ? 0.07 : mt > cV + 0.25 ? 0.04 : 0);
+      const st = { ballTrack: ballRef, prevHip: null, miss: 0, aspect };
+      const frames = await densePass(vid.v, {
+        start, end, rot, maxFrames: 130, st, stride,
+        onProgress: (p) => prog(p, `מנתח את הבעיטה… ${Math.round(p * 100)}%`),
       });
+      const a2 = st.aspect;
       if (frames.filter((f) => f.pose).length >= 8) {
         const result = analyzeKick(frames, a2, ballRef);
         if (result.ok || !analyzeKick(liveFrames, aspect, ballRef).ok) {
@@ -483,6 +496,8 @@ async function finishRecording() {
     } catch (e) {
       if (e.message === 'cancel') { recycle(liveFrames); show('home'); renderHome(); return; }
       console.warn('ניתוח הסרטון נכשל, משתמשים בניתוח החי', e);
+    } finally {
+      vid.close();
     }
   }
   // גיבוי: הפריימים שנותחו בזמן אמת
@@ -638,26 +653,28 @@ function makeHiddenVideo() {
   return v;
 }
 
-function processStill(v, t, rot, st) {
+function processStill(v, t, rot, st, { full = true, snapW = CONFIG.denseSnapshotWidth } = {}) {
   const rw = v.videoWidth, rh = v.videoHeight;
   const src = rotatedSource(rot, rw, rh, v);
   const vw = rot ? rh : rw, vh = rot ? rw : rh;
-  const poses = detectPoses(src, t, true);
-  const cands = detectBalls(src, t, vw, vh);
+  const poses = detectPoses(src, t, full);
+  // זיהוי כדור רק בכל פריים שני (הוא איטי, והכדור עומד עד הבעיטה)
+  st.n = (st.n || 0) + 1;
+  const cands = st.n % 2 === 1 || !st.ballTrack ? detectBalls(src, t, vw, vh) : null;
   const kid = selectKid(poses, st.ballTrack, st.prevHip);
   if (kid) st.prevHip = hipCenter(kid);
-  const b = selectBall(cands, st.ballTrack, kid ? bodyBox(kid)?.h : null);
-  if (b) { st.ballTrack = b; st.miss = 0; } else if (++st.miss > 10) st.ballTrack = null;
+  const b = cands ? selectBall(cands, st.ballTrack, kid ? bodyBox(kid)?.h : null) : null;
+  if (b) { st.ballTrack = b; st.miss = 0; } else if (cands && ++st.miss > 6) st.ballTrack = null;
   st.aspect = vw / vh;
-  return { t, pose: kid, ball: b, snap: snapshot(src, vw, vh) };
+  return { t, pose: kid, ball: b, snap: snapshot(src, vw, vh, snapW) };
 }
 
 // מנגנים את הסרטון לאט, ועוצרים על כל פריים כדי לנתח אותו
-function extractByPlayback(v, { start, end, rot, maxFrames, st, onProgress }) {
-  return new Promise((resolve, reject) => {
+// stride(mt) = המרווח המינימלי (בשניות) בין פריימים שמנתחים בזמן mt – צפוף סביב הבעיטה, דליל לפניה
+function extractByPlayback(v, { start, end, rot, maxFrames, st, onProgress, stride = () => 0, full = true }) {
+  return new Promise(async (resolve, reject) => {
     const frames = [];
     const span = Number.isFinite(end) ? end - start : 0;
-    const stride = span > 0 ? span / maxFrames : 0;
     let lastT = -1, done = false, lastCb = performance.now();
     const finish = () => {
       if (done) return;
@@ -675,12 +692,12 @@ function extractByPlayback(v, { start, end, rot, maxFrames, st, onProgress }) {
       if (S.cancelProcessing) { done = true; clearInterval(watchdog); v.pause(); return reject(new Error('cancel')); }
       const mt = meta.mediaTime;
       if (mt > end || frames.length >= maxFrames) return finish();
-      if (mt < start) { v.playbackRate = 4; v.requestVideoFrameCallback(cb); return; }
-      v.playbackRate = 0.3;
-      if (mt > lastT + 1e-4 && mt - lastT >= stride) {
+      if (mt < start) { v.playbackRate = 2; v.requestVideoFrameCallback(cb); return; }
+      v.playbackRate = 0.5;
+      if (mt > lastT + 1e-4 && mt - lastT >= stride(mt) - 1e-4) {
         v.pause();
         lastT = mt;
-        try { frames.push(processStill(v, mt * 1000, rot, st)); } catch (e) { console.warn(e); }
+        try { frames.push(processStill(v, mt * 1000, rot, st, { full })); } catch (e) { console.warn(e); }
         onProgress?.(span > 0 ? (mt - start) / span : Math.min(0.95, frames.length / 200));
         v.requestVideoFrameCallback(cb);
         try { await v.play(); } catch { finish(); }
@@ -688,49 +705,46 @@ function extractByPlayback(v, { start, end, rot, maxFrames, st, onProgress }) {
       }
       v.requestVideoFrameCallback(cb);
     };
+    // קופצים ישר לתחילת החלון במקום לנגן מההתחלה
+    if (start > 0.3) {
+      const sk = once(v, 'seeked').catch(() => {});
+      v.currentTime = Math.max(0, start - 0.15);
+      await Promise.race([sk, timeout(1500)]);
+    }
     v.requestVideoFrameCallback(cb);
-    v.currentTime = 0;
     v.play().catch(reject);
   });
 }
 
 // גיבוי לדפדפנים בלי requestVideoFrameCallback: קפיצה בזמן (seek) לכל פריים
-async function extractBySeek(v, { start, end, rot, maxFrames, st, onProgress }) {
+async function extractBySeek(v, { start, end, rot, maxFrames, st, onProgress, full = true, snapW }) {
   const dur = Number.isFinite(v.duration) ? v.duration : end;
   const to = Math.min(dur, end);
-  const step = Math.max(1 / 30, (to - start) / maxFrames);
+  const step = Math.max(1 / 60, (to - start) / maxFrames);
   const frames = [];
   for (let ts = start; ts < to; ts += step) {
     if (S.cancelProcessing) throw new Error('cancel');
     await seek(v, ts);
-    frames.push(processStill(v, ts * 1000, rot, st));
+    frames.push(processStill(v, ts * 1000, rot, st, { full, snapW }));
     onProgress?.((ts - start) / (to - start));
   }
   return frames;
 }
 
-async function analyzeVideo(src, { start = 0, end = 15, rot = 0, maxFrames = 280, ballHint = null, onProgress } = {}) {
+async function openVideo(src) {
   const v = makeHiddenVideo();
   const url = URL.createObjectURL(src);
   v.src = url;
   v.load();
   const loaded = v.readyState >= 2 ? Promise.resolve() : once(v, 'loadeddata');
-  try {
-    await loadModels({ full: true, onStatus: (t) => onProgress?.(0, t) });
-    await loaded;
-    const st = { ballTrack: ballHint, prevHip: null, miss: 0, aspect: 16 / 9 };
-    const opts = { start, end, rot, maxFrames, st, onProgress: (p) => onProgress?.(p) };
-    let frames;
-    if (v.requestVideoFrameCallback) frames = await extractByPlayback(v, opts);
-    else {
-      try { await v.play(); v.pause(); } catch { /* */ }
-      frames = await extractBySeek(v, opts);
-    }
-    return { frames, aspect: st.aspect, duration: v.duration };
-  } finally {
-    URL.revokeObjectURL(url);
-    v.remove();
-  }
+  return { v, loaded, close: () => { URL.revokeObjectURL(url); v.remove(); } };
+}
+
+// מעבר מדויק (מודל full) על חלון בזמן, בצפיפות שנקבעת ע"י stride
+async function densePass(v, opts) {
+  if (v.requestVideoFrameCallback) return extractByPlayback(v, opts);
+  try { await v.play(); v.pause(); } catch { /* */ }
+  return extractBySeek(v, { ...opts, maxFrames: Math.min(opts.maxFrames, 90) });
 }
 
 function procProgress(label) {
@@ -740,17 +754,58 @@ function procProgress(label) {
   };
 }
 
+// סרטון מהגלריה: מעבר מהיר (מודל lite, ~45 פריימים) כדי למצוא את רגע הבעיטה,
+// ואז מעבר מדויק רק סביבו. כך גם סרטון Slo-mo ארוך מנותח מהר.
 async function analyzeFile(file) {
   unlockSpeech();
   show('processing');
   S.cancelProcessing = false;
-  const prog = procProgress('מנתח את הסרטון פריים אחרי פריים…');
+  const prog = procProgress('');
   prog(0, 'טוען את המודלים…');
+  const vid = await openVideo(file);
   try {
-    const { frames, aspect, duration } = await analyzeVideo(file, { start: 0, end: 15, maxFrames: 300, onProgress: prog });
-    const result = analyzeKick(frames, aspect);
-    if (duration > 15) toast('נותחו 15 השניות הראשונות. כדאי לחתוך את הסרטון סביב הבעיטה.', 4000);
-    showResults(frames, aspect, result, {});
+    await Promise.all([loadModels({ onStatus: (t) => prog(0, t) }), loadModels({ full: true, onStatus: (t) => prog(0, t) })]);
+    prog(0, 'טוען את הסרטון…');
+    await vid.loaded;
+    const v = vid.v;
+    try { await v.play(); v.pause(); } catch { /* */ }
+    const dur = Number.isFinite(v.duration) ? v.duration : 10;
+    const maxDur = Math.min(dur, 20);
+
+    // מעבר 1: סריקה מהירה
+    const st1 = { ballTrack: null, prevHip: null, miss: 0, aspect: 16 / 9 };
+    const coarse = await extractBySeek(v, {
+      start: 0, end: maxDur, rot: 0, maxFrames: 45, st: st1, full: false, snapW: CONFIG.snapshotWidth,
+      onProgress: (p) => prog(p * 0.35, `מחפש את רגע הבעיטה… ${Math.round(p * 100)}%`),
+    });
+    const aspect = st1.aspect;
+    const rough = analyzeKick(coarse, aspect);
+    const step = maxDur / 45;
+
+    // מעבר 2: ניתוח מדויק סביב הבעיטה
+    let start, end;
+    if (rough.ok) {
+      const cT = coarse[rough.contactIdx].t / 1000;
+      start = Math.max(0, cT - 4 * step);
+      end = Math.min(maxDur, cT + 3 * step);
+    } else {
+      start = 0;
+      end = maxDur;
+    }
+    const st2 = { ballTrack: rough.ok ? rough.ballRef : null, prevHip: null, miss: 0, aspect };
+    const dense = await densePass(v, {
+      start, end, rot: 0, maxFrames: rough.ok ? 100 : 160, st: st2,
+      stride: () => (end - start) / (rough.ok ? 100 : 160),
+      onProgress: (p) => prog(0.35 + p * 0.65, `מנתח את הבעיטה… ${Math.round(p * 100)}%`),
+    });
+    // מחברים: פריימים מהירים מחוץ לחלון (בשביל ריצת התנופה) + הפריימים המדויקים בתוכו
+    const t0 = dense.length ? dense[0].t : start * 1000, t1 = dense.length ? dense[dense.length - 1].t : end * 1000;
+    const frames = [...coarse.filter((f) => f.t < t0), ...dense, ...coarse.filter((f) => f.t > t1)].sort((a, b) => a.t - b.t);
+    let result = analyzeKick(frames, aspect);
+    let shown = frames;
+    if (!result.ok && rough.ok) { result = rough; shown = coarse; }
+    if (dur > 20) toast('נותחו 20 השניות הראשונות. כדאי לחתוך את הסרטון סביב הבעיטה.', 4000);
+    showResults(shown, aspect, result, {});
   } catch (e) {
     if (e.message !== 'cancel') {
       console.error(e);
@@ -758,6 +813,8 @@ async function analyzeFile(file) {
     }
     show('home');
     renderHome();
+  } finally {
+    vid.close();
   }
 }
 $('#file-input').addEventListener('change', (e) => {
@@ -844,10 +901,14 @@ function renderResult() {
     const diff = good / total - prev.good / prev.total;
     if (diff > 0.01) progress = `<p>📈 שיפור לעומת הבעיטה הקודמת!</p>`;
   }
+  const useAi = settings.ai && aiConfigured();
   body.innerHTML = `
+    ${useAi ? `<section class="card ai-status" id="ai-status"><span class="mini-spin"></span> המאמן החכם בודק את התנועה בתמונות…</section>` : ''}
+    <div id="fb-cards">
     ${fb.good.length ? `<section class="card fb good"><h3>✅ מה היה טוב</h3><ul>${li(fb.good)}</ul></section>` : ''}
     ${fb.improve.length ? `<section class="card fb improve"><h3>🔧 מה לשפר</h3><ul>${li(fb.improve)}</ul></section>` : ''}
     <section class="card fb keep"><h3>⭐ על מה לשמור</h3><p style="margin:0">${esc(fb.keep)}</p>${progress}</section>
+    </div>
     <details class="card"><summary>פירוט המדידות</summary>
       <table class="metrics">${rows}</table>
       <p class="note" style="margin-top:8px">המדידה מבוססת על צילום דו-ממדי מהצד ומשמשת כהכוונה, לא כשיפוט מדויק.</p>
@@ -867,8 +928,50 @@ function renderResult() {
     try { await navigator.clipboard.writeText(JSON.stringify(data)); toast('הנתונים הועתקו. אפשר להדביק ולשלוח'); }
     catch { toast('לא הצלחתי להעתיק'); }
   });
-  speak(fb.speech);
   drawViewer();
+  if (!useAi) { speak(fb.speech); return; }
+
+  // המאמן החכם: התשובה מחליפה את המשוב האוטומטי. אם נכשל – נשארים עם המשוב האוטומטי.
+  const token = (S.res.token = Math.random());
+  speak(g('רגע, אני בודק את הבעיטה', 'רגע, אני בודקת את הבעיטה'));
+  reviewKick(S.res.frames, result, S.res.aspect, settings)
+    .then(({ feedback: ai }) => {
+      if (S.res?.token !== token) return;
+      const status = $('#ai-status');
+      if (!ai.usable) {
+        status.innerHTML = `🤖 המאמן החכם: ${esc(ai.problem || 'לא רואים את הבעיטה מספיק טוב בתמונות')}`;
+        speak(fb.speech);
+        return;
+      }
+      const L = (arr) => (arr || []).map((x) => `<li>${esc(x)}</li>`).join('');
+      $('#stars').textContent = '★'.repeat(ai.stars) + '☆'.repeat(5 - ai.stars);
+      $('#res-title').textContent = ai.opener;
+      $('#fb-cards').innerHTML = `
+        ${ai.good?.length ? `<section class="card fb good"><h3>✅ מה היה טוב</h3><ul>${L(ai.good)}</ul></section>` : ''}
+        ${ai.improve?.length ? `<section class="card fb improve"><h3>🔧 מה לשפר</h3><ul>${L(ai.improve)}</ul></section>` : ''}
+        ${ai.keep ? `<section class="card fb keep"><h3>⭐ על מה לשמור</h3><p style="margin:0">${esc(ai.keep)}</p>${progress}</section>` : ''}`;
+      status.textContent = '🤖 המשוב נבדק על ידי המאמן החכם (Claude)';
+      status.classList.add('done');
+      // עמודת השוואה בטבלת המדידות
+      const V = { good: '✓', improve: 'לשפר', unclear: '?' };
+      document.querySelectorAll('table.metrics tr').forEach((tr, i) => {
+        const id = Object.keys(result.metrics)[i];
+        const v = ai.verdicts?.[id];
+        tr.insertAdjacentHTML('beforeend', `<td class="st ai">${v ? 'AI ' + V[v] : ''}</td>`);
+      });
+      S.res.speech = aiSpeech(ai);
+      speak(S.res.speech);
+    })
+    .catch((e) => {
+      if (S.res?.token !== token) return;
+      console.warn('AI review', e);
+      const msg = e.message === 'not-configured'
+        ? 'המאמן החכם עוד לא הוגדר בשרת – מוצג משוב אוטומטי'
+        : 'המאמן החכם לא זמין כרגע – מוצג משוב אוטומטי';
+      const status = $('#ai-status');
+      if (status) status.textContent = msg;
+      speak(fb.speech);
+    });
 }
 
 function drawViewer() {

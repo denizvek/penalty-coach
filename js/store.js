@@ -3,7 +3,7 @@
 const SETTINGS_KEY = 'pc.settings';
 const HISTORY_KEY = 'pc.history';
 
-const DEFAULTS = { name: '', gender: 'm', voice: true, debug: false, facing: 'environment' };
+const DEFAULTS = { name: '', age: '', gender: 'm', voice: true, debug: false, facing: 'environment', ai: true };
 
 function read(key, fallback) {
   try {

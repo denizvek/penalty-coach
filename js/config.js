@@ -18,7 +18,13 @@ export const CONFIG = {
   armedTimeoutMs: 40000, // אם אין בעיטה – חוזרים לכיוון
   afterKickMs: 1000, // ממשיכים להקליט אחרי הבעיטה (בשביל ההמשך של התנועה)
   ballEveryNFrames: 3, // זיהוי כדור בכל N פריימים (חוסך חישוב)
-  snapshotWidth: 320, // רוחב תמונות הפריימים שנשמרות לצפייה חוזרת
+  snapshotWidth: 320, // רוחב תמונות הפריימים בזמן אמת
+  denseSnapshotWidth: 560, // רוחב התמונות בניתוח המדויק סביב הבעיטה (גם בשביל המאמן החכם)
+
+  // המאמן החכם (Claude): כתובת פונקציית השרת. ריק = כבוי
+  aiEndpoint: 'https://feoomirbcgyypvueaonc.supabase.co/functions/v1/kick-review',
+  aiImageMax: 640, // צלע מקסימלית של תמונה שנשלחת
+  aiTimeoutMs: 35000,
 
   framing: {
     minKidHeight: 0.28, // גובה הילד כחלק מגובה הפריים
